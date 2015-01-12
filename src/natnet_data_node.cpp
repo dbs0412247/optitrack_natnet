@@ -15,12 +15,21 @@
 
 // System includes
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Local includes 
 #include "optitrack_natnet/socket.h" 
 
 // NatNetSDK includes
 #include "NatNetSDK/NatNetTypes.h"
+
+// ROS includes
+#include <ros/ros.h>
+
+// Constants
+#define MULTICAST_IP "224.0.0.1"
+#define LOCAL_PORT 1511
 
 bool DecodeTimecode(unsigned int inTimecode, unsigned int inTimecodeSubframe, int* hour, int* minute, int* second, int* frame, int* subframe)
 {
@@ -37,6 +46,8 @@ bool DecodeTimecode(unsigned int inTimecode, unsigned int inTimecodeSubframe, in
 
 bool TimecodeStringify(unsigned int inTimecode, unsigned int inTimecodeSubframe, char *Buffer, int BufferSize)
 {
+// TODO: adapt code to linux 
+/*
   bool bValid;
   int hour, minute, second, frame, subframe;
   bValid = DecodeTimecode(inTimecode, inTimecodeSubframe, &hour, &minute, &second, &frame, &subframe);
@@ -47,11 +58,12 @@ bool TimecodeStringify(unsigned int inTimecode, unsigned int inTimecodeSubframe,
                   Buffer[i]='0';
 
   return bValid;
+*/
 }
 
 void destroyRigidBody(sRigidBodyData &data) {
   for (int i = 0; i < data.nMarkers; i++)  {
-    free(data.MarkerData);
+    free(data.Markers);
     free(data.MarkerIDs);
     free(data.MarkerSizes);
   }
@@ -82,7 +94,7 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
   int major = 2; 
   int minor = 7;
 
-  char *ptr = pData;
+  char *ptr = (char *)pData;
  
   // message ID
   int MessageID = 0;
@@ -100,15 +112,15 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
     memcpy(&(data.nMarkerSets), ptr, 4); ptr += 4;
     for (int i=0; i < data.nMarkerSets; i++) {    
       // Markerset name
-      strcpy_s(data.MocapData[i].szName, ptr);
+      strcpy(data.MocapData[i].szName, ptr);
       int nDataBytes = (int) strlen(data.MocapData[i].szName) + 1;
       ptr += nDataBytes;
 
       // marker data
       int nMarkers = 0; memcpy(&nMarkers, ptr, 4); ptr += 4;
       data.MocapData[i].nMarkers = nMarkers;
-      int nBytes = nMarkers*3*sizeof(float);
-      data.MocapData[i].Markers = (float*)malloc(nBytes);
+      int nBytes = nMarkers*sizeof(float[3]);
+      data.MocapData[i].Markers = (float(*)[3])malloc(nBytes);
       memcpy(data.MocapData[i].Markers, ptr, nBytes);
       ptr += nBytes; 
     }
@@ -116,8 +128,8 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
     // unidentified markers
     int nOtherMarkers = 0; memcpy(&nOtherMarkers, ptr, 4); ptr += 4;
     data.nOtherMarkers = nOtherMarkers;
-    int nOtherMarkerBytes = nOtherMarkers*3*sizeof(float);
-    data.OtherMarkers = (float*)malloc(nOtherMarkerBytes);
+    int nOtherMarkerBytes = nOtherMarkers*sizeof(float[3]);
+    data.OtherMarkers = (float(*)[3])malloc(nOtherMarkerBytes);
     memcpy(data.OtherMarkers, ptr, nOtherMarkerBytes);
     ptr += nOtherMarkerBytes;
             
@@ -143,10 +155,10 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
       data.RigidBodies[j].qw = qw;
 
       // associated marker positions
-      memcpy(&nRigidMarkers, ptr, 4); ptr += 4;
+      int nRigidMarkers = 0; memcpy(&nRigidMarkers, ptr, 4); ptr += 4;
       data.RigidBodies[j].nMarkers = nRigidMarkers;
-      int nBytes = nRigidMarkers*3*sizeof(float);
-      data.RigidBodies[j].Markers = (float*)malloc(nBytes);
+      int nBytes = nRigidMarkers*sizeof(float[3]);
+      data.RigidBodies[j].Markers = (float(*)[3])malloc(nBytes);
       memcpy(data.RigidBodies[j].Markers, ptr, nBytes);
       ptr += nBytes;
             
@@ -154,13 +166,13 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
         // associated marker IDs
         nBytes = nRigidMarkers*sizeof(int);
         data.RigidBodies[j].MarkerIDs = (int*)malloc(nBytes);
-        memcpy(markerIDs, ptr, nBytes);
+        memcpy(data.RigidBodies[j].MarkerIDs, ptr, nBytes);
         ptr += nBytes;
         
         // associated marker sizes
         nBytes = nRigidMarkers*sizeof(float);
         data.RigidBodies[j].MarkerSizes = (float*)malloc(nBytes);
-        memcpy(markerSizes, ptr, nBytes);
+        memcpy(data.RigidBodies[j].MarkerSizes, ptr, nBytes);
         ptr += nBytes;
 
         // Mean marker error
@@ -285,14 +297,14 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
     // timestamp
     double timestamp = 0.0f;
     // 2.7 and later - increased from single to double precision
-    if( ((major == 2)&&(minor>=7)) || (major>2)) 
+    if( ((major == 2)&&(minor>=7)) || (major>2)) {
       memcpy(&timestamp, ptr, 8); ptr += 8;
-    else {
+    } else {
       float fTemp = 0.0f;
       memcpy(&fTemp, ptr, 4); ptr += 4;
       timestamp = (double)fTemp;
     }
-    data.fTimeStamp = timestamp;
+    data.fTimestamp = timestamp;
 
     // frame params
     memcpy(&(data.params), ptr, 2); ptr += 2;
@@ -320,7 +332,7 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
       {
         // name
         char szName[256];
-        strcpy_s(szName, ptr);
+        strcpy(szName, ptr);
         int nDataBytes = (int) strlen(szName) + 1;
         ptr += nDataBytes;
         printf("Markerset Name: %s\n", szName);
@@ -332,7 +344,7 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
         for(int j=0; j < nMarkers; j++)
         {
           char szName[256];
-          strcpy_s(szName, ptr);
+          strcpy(szName, ptr);
           int nDataBytes = (int) strlen(szName) + 1;
           ptr += nDataBytes;
           printf("Marker Name: %s\n", szName);
@@ -417,10 +429,11 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
 
 int main (int argc, char **argv) {
   // Initialize ROS node
-  ros::init(argc, argv, "mocap_node");
+  ros::init(argc, argv, "natnet_data_node");
   ros::NodeHandle n("~");
 
   // TODO: Get configuration from ROS parameter server  
+  /*
   const char** mocap_model( DEFAULT_MOCAP_MODEL );
   if( n.hasParam( MOCAP_MODEL_KEY ) )  {    
     std::string tmp;
@@ -450,6 +463,7 @@ int main (int argc, char **argv) {
           if (!result.second)  {
             ROS_ERROR("Could not insert configuration for rigid body ID %s", id.c_str());
   }}}}}
+  */
 
   // create unix socket to read incoming data
   UdpMulticastSocket multicast_client_socket( LOCAL_PORT, MULTICAST_IP );

@@ -7,7 +7,6 @@ project(optitrack_natnet)
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   message_generation
-  message_runtime
   roscpp
   roslaunch
   rviz
@@ -85,9 +84,9 @@ find_package(catkin REQUIRED COMPONENTS
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
+  INCLUDE_DIRS include
 #  LIBRARIES optitrack_natnet
-#  CATKIN_DEPENDS geometry_msgs message_generation roscpp roslaunch rviz std_msgs tf
+  CATKIN_DEPENDS roscpp message_runtime
 #  DEPENDS system_lib
 )
 
@@ -98,7 +97,7 @@ catkin_package(
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 # include_directories(include)
-include_directories(
+include_directories( include
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -108,16 +107,19 @@ include_directories(
 # )
 
 ## Declare a cpp executable
-# add_executable(optitrack_natnet_node src/optitrack_natnet_node.cpp)
+add_executable(natnet_data_node 
+  src/natnet_data_node.cpp
+  src/socket.cpp
+)
 
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
 # add_dependencies(optitrack_natnet_node optitrack_natnet_generate_messages_cpp)
 
 ## Specify libraries to link a library or executable target against
-# target_link_libraries(optitrack_natnet_node
-#   ${catkin_LIBRARIES}
-# )
+target_link_libraries(natnet_data_node
+  ${catkin_LIBRARIES}
+)
 
 #############
 ## Install ##

@@ -7,7 +7,7 @@
 
 // Implementation of the Socket class.
 
-#include "mocap_optitrack/socket.h"
+#include "optitrack_natnet/socket.h"
 #include <cstring>
 #include <cerrno>
 #include <fcntl.h>
