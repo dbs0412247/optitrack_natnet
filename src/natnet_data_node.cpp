@@ -26,10 +26,31 @@
 
 // ROS includes
 #include <ros/ros.h>
+#include <tf/transform_broadcaster.h>
 
 // Constants
-#define MULTICAST_IP "224.0.0.1"
+#define MULTICAST_IP "239.255.42.99"
 #define LOCAL_PORT 1511
+
+void broadcastTfData(sFrameOfMocapData &data) {
+  static tf::TransformBroadcaster br;
+  // broadcast each Rigid Body
+  for (int i = 0; i < data.nRigidBodies; i++) { 
+    tf::Transform transform;
+    transform.setOrigin(tf::Vector3(
+      data.RigidBodies[i].x, 
+      data.RigidBodies[i].y,
+      data.RigidBodies[i].z) );
+    tf::Quaternion q(
+      data.RigidBodies[i].qx, 
+      data.RigidBodies[i].qy,
+      data.RigidBodies[i].qz,
+      data.RigidBodies[i].qw);
+    transform.setRotation(q);
+    // TODO: figure out the timestamps
+    //br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", ));
+  }
+}
 
 bool DecodeTimecode(unsigned int inTimecode, unsigned int inTimecodeSubframe, int* hour, int* minute, int* second, int* frame, int* subframe)
 {
@@ -46,46 +67,40 @@ bool DecodeTimecode(unsigned int inTimecode, unsigned int inTimecodeSubframe, in
 
 bool TimecodeStringify(unsigned int inTimecode, unsigned int inTimecodeSubframe, char *Buffer, int BufferSize)
 {
-// TODO: adapt code to linux 
-/*
   bool bValid;
   int hour, minute, second, frame, subframe;
   bValid = DecodeTimecode(inTimecode, inTimecodeSubframe, &hour, &minute, &second, &frame, &subframe);
 
-  sprintf_s(Buffer,BufferSize,"%2d:%2d:%2d:%2d.%d",hour, minute, second, frame, subframe);
+  snprintf(Buffer,BufferSize,"%2d:%2d:%2d:%2d.%d",hour, minute, second, frame, subframe);
   for(unsigned int i=0; i<strlen(Buffer); i++)
           if(Buffer[i]==' ')
                   Buffer[i]='0';
 
   return bValid;
-*/
 }
 
 void destroyRigidBody(sRigidBodyData &data) {
-  for (int i = 0; i < data.nMarkers; i++)  {
-    free(data.Markers);
-    free(data.MarkerIDs);
-    free(data.MarkerSizes);
-  }
+  free(data.Markers);
+  free(data.MarkerIDs);
+  free(data.MarkerSizes);
 }
 
 void destroySkeleton(sSkeletonData &data) {
   for (int i = 0; i < data.nRigidBodies; i++) 
     destroyRigidBody(data.RigidBodyData[i]);
-  free(data.RigidBodyData);
+  if (data.nRigidBodies) 
+    free(data.RigidBodyData);
 }
 
 void destroyDataPacket(sFrameOfMocapData &data) {
   for (int i = 0; i < data.nMarkerSets; i++) 
-    free(data.MocapData[i].Markers);
+    free(data.MocapData[i].Markers); 
   for (int i = 0; i < data.nOtherMarkers; i++) 
    free(data.OtherMarkers);
   for (int i = 0; i < data.nRigidBodies; i++) 
     destroyRigidBody(data.RigidBodies[i]);
-  free(data.RigidBodies);
   for (int i = 0; i < data.nSkeletons; i++) 
     destroySkeleton(data.Skeletons[i]);
-  free(data.Skeletons);
 }
 
 void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
@@ -107,6 +122,7 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
   if(MessageID == NAT_FRAMEOFDATA) {      // FRAME OF MOCAP DATA packet (7)
     // frame number
     memcpy(&(data.iFrame), ptr, 4); ptr += 4;
+    printf("iFrame = %d\n", data.iFrame);
     	
     // number of data sets (markersets, rigidbodies, etc)
     memcpy(&(data.nMarkerSets), ptr, 4); ptr += 4;
@@ -157,11 +173,11 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
       // associated marker positions
       int nRigidMarkers = 0; memcpy(&nRigidMarkers, ptr, 4); ptr += 4;
       data.RigidBodies[j].nMarkers = nRigidMarkers;
+      
       int nBytes = nRigidMarkers*sizeof(float[3]);
       data.RigidBodies[j].Markers = (float(*)[3])malloc(nBytes);
       memcpy(data.RigidBodies[j].Markers, ptr, nBytes);
       ptr += nBytes;
-            
       if(major >= 2) {
         // associated marker IDs
         nBytes = nRigidMarkers*sizeof(int);
@@ -291,8 +307,9 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
     memcpy(&(data.Timecode), ptr, 4);	ptr += 4;
     memcpy(&(data.TimecodeSubframe), ptr, 4); ptr += 4;
     // Reference code to decode Timecodes
-    //char szTimecode[128] = "";
-    //TimecodeStringify(timecode, timecodeSub, szTimecode, 128);
+    char szTimecode[128] = "";
+    TimecodeStringify(data.Timecode, data.TimecodeSubframe, szTimecode, 128);
+    printf("Timecode =\t%s\n", szTimecode);
 
     // timestamp
     double timestamp = 0.0f;
@@ -305,7 +322,8 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
       timestamp = (double)fTemp;
     }
     data.fTimestamp = timestamp;
-
+    printf("Timestamp =\t%f\n", timestamp);
+    
     // frame params
     memcpy(&(data.params), ptr, 2); ptr += 2;
     // Reference code
@@ -480,10 +498,9 @@ int main (int argc, char **argv) {
         const char* buffer = multicast_client_socket.getBuffer();        
         // parse a data packet
         sFrameOfMocapData data;
-        parseDataPacket(buffer, data); 
-        // TODO: publish data to rviz, etc.
-
-       
+        parseDataPacket(buffer, data);
+        // publish data to tf
+        broadcastTfData(data);
         // Free memory
         destroyDataPacket(data);
         packetread = true;
