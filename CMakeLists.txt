@@ -9,6 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   roscpp
   roslaunch
+  rosbag
   rviz
   std_msgs
   tf

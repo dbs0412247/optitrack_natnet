@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 // Local includes 
 #include "optitrack_natnet/socket.h" 
@@ -27,29 +28,59 @@
 // ROS includes
 #include <ros/ros.h>
 #include <tf/transform_broadcaster.h>
+#include <rosbag/bag.h>
 
 // Constants
-#define MULTICAST_IP "239.255.42.99"
-#define LOCAL_PORT 1511
+#define MULTICAST_IP  "239.255.42.99"
+#define DATA_PORT     1511
+#define CMD_PORT      1510
 
-void broadcastTfData(sFrameOfMocapData &data) {
+ros::Time first_ros_time;
+ros::Time first_timestamp;
+bool first_observation = true;
+
+void broadcastRecordTfData(sFrameOfMocapData &data, rosbag::Bag &bag) {
   static tf::TransformBroadcaster br;
-  // broadcast each Rigid Body
-  for (int i = 0; i < data.nRigidBodies; i++) { 
-    tf::Transform transform;
-    transform.setOrigin(tf::Vector3(
-      data.RigidBodies[i].x, 
-      data.RigidBodies[i].y,
-      data.RigidBodies[i].z) );
-    tf::Quaternion q(
-      data.RigidBodies[i].qx, 
-      data.RigidBodies[i].qy,
-      data.RigidBodies[i].qz,
-      data.RigidBodies[i].qw);
-    transform.setRotation(q);
-    // TODO: figure out the timestamps
-    //br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", ));
+  // calculate correct timestamp of msg
+  if (first_observation) {
+    first_observation = false;
+    first_ros_time = ros::Time::now();
+    first_timestamp = ros::Time(data.fTimestamp);
   }
+  ros::Duration timestamp_delta = ros::Time(data.fTimestamp) - first_timestamp;
+  ros::Time time_of_data = first_ros_time + timestamp_delta; 
+  bool bIsRecording = data.params & 0x01;
+  std::vector< geometry_msgs::TransformStamped > vec_msg;
+  tf::tfMessage tfmsg;
+  // broadcast each Rigid Body
+  for (int i = 0; i < data.nRigidBodies; i++) {
+    if (data.RigidBodies[i].params & 0x01) { // bTrackingValid
+      //printf("...Seen\n");
+      char name[20];
+      tf::Transform transform;
+      transform.setOrigin(tf::Vector3(
+        data.RigidBodies[i].x, 
+        data.RigidBodies[i].y,
+        data.RigidBodies[i].z) );
+      tf::Quaternion q(
+        data.RigidBodies[i].qx, 
+        data.RigidBodies[i].qy,
+        data.RigidBodies[i].qz,
+        data.RigidBodies[i].qw);
+      transform.setRotation(q);
+      sprintf(name, "Rigid_Body_ID_%d", data.RigidBodies[i].ID); 
+      tf::StampedTransform stamped_tf = tf::StampedTransform(transform, time_of_data, "world", name); 
+      br.sendTransform(stamped_tf);
+      // start recording to rosbag if mocap is also recording
+      if (bIsRecording) {
+        // converting a tf::Transform into a geometry_msgs::TransformStamped,
+        // then into a tf::tfMessage for writing into rosbag        
+        geometry_msgs::TransformStamped msg;
+        tf::transformStampedTFToMsg(stamped_tf, msg);
+        bag.write("/tf", time_of_data, msg);
+      }    
+    }  // end if bTrackingValid 
+  } // end for
 }
 
 bool DecodeTimecode(unsigned int inTimecode, unsigned int inTimecodeSubframe, int* hour, int* minute, int* second, int* frame, int* subframe)
@@ -95,7 +126,7 @@ void destroySkeleton(sSkeletonData &data) {
 void destroyDataPacket(sFrameOfMocapData &data) {
   for (int i = 0; i < data.nMarkerSets; i++) 
     free(data.MocapData[i].Markers); 
-  for (int i = 0; i < data.nOtherMarkers; i++) 
+  if (data.nOtherMarkers) 
    free(data.OtherMarkers);
   for (int i = 0; i < data.nRigidBodies; i++) 
     destroyRigidBody(data.RigidBodies[i]);
@@ -103,7 +134,8 @@ void destroyDataPacket(sFrameOfMocapData &data) {
     destroySkeleton(data.Skeletons[i]);
 }
 
-void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
+bool parseDataPacket(const char* pData, sFrameOfMocapData &data, sDataDescriptions &desc) {
+  
 
   // TODO: figure out how to get NatNetVersion
   int major = 2; 
@@ -122,10 +154,11 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
   if(MessageID == NAT_FRAMEOFDATA) {      // FRAME OF MOCAP DATA packet (7)
     // frame number
     memcpy(&(data.iFrame), ptr, 4); ptr += 4;
-    printf("iFrame = %d\n", data.iFrame);
+    //printf("iFrame = %d\n", data.iFrame);
     	
     // number of data sets (markersets, rigidbodies, etc)
     memcpy(&(data.nMarkerSets), ptr, 4); ptr += 4;
+    //printf("nMarkerSets = %d\n", data.nMarkerSets);
     for (int i=0; i < data.nMarkerSets; i++) {    
       // Markerset name
       strcpy(data.MocapData[i].szName, ptr);
@@ -144,6 +177,7 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
     // unidentified markers
     int nOtherMarkers = 0; memcpy(&nOtherMarkers, ptr, 4); ptr += 4;
     data.nOtherMarkers = nOtherMarkers;
+    //printf("nOtherMarkers = %d\n", data.nOtherMarkers);
     int nOtherMarkerBytes = nOtherMarkers*sizeof(float[3]);
     data.OtherMarkers = (float(*)[3])malloc(nOtherMarkerBytes);
     memcpy(data.OtherMarkers, ptr, nOtherMarkerBytes);
@@ -151,6 +185,7 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
             
     // rigid bodies
     memcpy(&(data.nRigidBodies), ptr, 4); ptr += 4;
+    //printf("nRigidBodies = %d\n", data.nRigidBodies);
     for (int j=0; j < data.nRigidBodies; j++) {
       // rigid body pos/ori
       int ID = 0; memcpy(&ID, ptr, 4); ptr += 4;
@@ -200,17 +235,19 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
         // params
         memcpy(&(data.RigidBodies[j].params), ptr, 2); ptr += 2;
         // Reference code        
-        // bool bTrackingValid = params & 0x01; // 0x01 : rigid body was successfully tracked in this frame
+        bool bTrackingValid = data.RigidBodies[j].params & 0x01; // 0x01 : rigid body was successfully tracked in this frame
       }        
     } // next rigid body
 
 
     // TODO: move RigidBody, Skeleton, etc. parsing into functions, so much code dup = =            
     // skeletons (version 2.1 and later), ignored for now cos we don't use skeletons
-    /*
+    
     if( ((major == 2)&&(minor>0)) || (major>2)) {
       int nSkeletons = 0; memcpy(&nSkeletons, ptr, 4); ptr += 4;
       data.nSkeletons = nSkeletons;
+      //printf("nSkeletons = %d\n", nSkeletons);
+/*
       for (int i=0; i < nSkeletons; i++)  {
         // skeleton id
         memcpy(&(data.Skeletons[i].skeletonID), ptr, 4); ptr += 4;
@@ -268,15 +305,15 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
               free(markerData);
 
         } // next rigid body
-
       } // next skeleton
+*/
     }
-    */
 
     // labeled markers (version 2.3 and later)
     if( ((major == 2)&&(minor>=3)) || (major>2)) {
       int nLabeledMarkers = 0;
       memcpy(&nLabeledMarkers, ptr, 4); ptr += 4;
+      //printf("nLabeledMarkers = %d\n", nLabeledMarkers);
       data.nLabeledMarkers = nLabeledMarkers;
       for (int j=0; j < nLabeledMarkers; j++) {	
 	int ID = 0; memcpy(&ID, ptr, 4); ptr += 4;
@@ -295,13 +332,14 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
           short params = 0; memcpy(&params, ptr, 2); ptr += 2;
           data.LabeledMarkers[j].params = params;
           // Reference code
-          // bool bOccluded = params & 0x01;     // marker was not visible (occluded) in this frame
-          // bool bPCSolved = params & 0x02;     // position provided by point cloud solve
-          // bool bModelSolved = params & 0x04;  // position provided by model solve
+          bool bOccluded = params & 0x01;     // marker was not visible (occluded) in this frame
+          bool bPCSolved = params & 0x02;     // position provided by point cloud solve
+          bool bModelSolved = params & 0x04;  // position provided by model solve
     } } }
 
     // latency
     memcpy(&(data.fLatency), ptr, 4); ptr += 4;
+    //printf("Latency =\t%f\n", data.fLatency);
 
     // timecode
     memcpy(&(data.Timecode), ptr, 4);	ptr += 4;
@@ -309,27 +347,36 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
     // Reference code to decode Timecodes
     char szTimecode[128] = "";
     TimecodeStringify(data.Timecode, data.TimecodeSubframe, szTimecode, 128);
-    printf("Timecode =\t%s\n", szTimecode);
+    //printf("Timecode =\t%s\n", szTimecode);
 
     // timestamp
-    double timestamp = 0.0f;
     // 2.7 and later - increased from single to double precision
+    double timestamp = -1.0f;
     if( ((major == 2)&&(minor>=7)) || (major>2)) {
       memcpy(&timestamp, ptr, 8); ptr += 8;
-    } else {
+    } else if ((major == 2) && (minor>=6)){
       float fTemp = 0.0f;
       memcpy(&fTemp, ptr, 4); ptr += 4;
       timestamp = (double)fTemp;
     }
     data.fTimestamp = timestamp;
-    printf("Timestamp =\t%f\n", timestamp);
+    //printf("Timestamp =\t%f\n", timestamp);
     
     // frame params
     memcpy(&(data.params), ptr, 2); ptr += 2;
     // Reference code
-    //bool bIsRecording = params & 0x01;                  // 0x01 Motive is recording
-    //bool bTrackedModelsChanged = params & 0x02;         // 0x02 Actively tracked model list has changed
-
+    bool bIsRecording = data.params & 0x01;                  // 0x01 Motive is recording
+    bool bTrackedModelsChanged = data.params & 0x02;         // 0x02 Actively tracked model list has changed
+/*
+    if (bIsRecording) 
+      printf("bIsRecording\n");
+    else 
+      printf("Not bIsRecording\n");
+    if (bTrackedModelsChanged) 
+      printf("bTrackedModelsChanged\n");
+    else 
+      printf("Not bTrackedModelsChanged\n"); 
+*/
     // end of data tag
     int eod = 0; memcpy(&eod, ptr, 4); ptr += 4;
   } // end if MessageID == NAT_FRAMEOFDATA (7)
@@ -337,111 +384,119 @@ void parseDataPacket(const char* pData, sFrameOfMocapData &data) {
   else if(MessageID == NAT_MODELDEF) { // Data Description (5)
     // number of datasets
     int nDatasets = 0; memcpy(&nDatasets, ptr, 4); ptr += 4;
-    printf("Dataset Count : %d\n", nDatasets);
+    desc.nDataDescriptions = nDatasets;
+    printf("nDataDescriptions: %d\n", nDatasets);
 
     for(int i=0; i < nDatasets; i++)
     {
-      printf("Dataset %d\n", i);
+      //printf("Dataset %d\n", i);
 
       int type = 0; memcpy(&type, ptr, 4); ptr += 4;
-      printf("Type : %d\n", i, type);
+      desc.arrDataDescriptions[i].type = type;
+      //printf("Type : %d\n", i, type);
 
       if(type == 0)   // markerset
       {
+        desc.arrDataDescriptions[i].Data.MarkerSetDescription = 
+          (sMarkerSetDescription *)malloc(sizeof(sMarkerSetDescription));        
+
         // name
-        char szName[256];
-        strcpy(szName, ptr);
-        int nDataBytes = (int) strlen(szName) + 1;
-        ptr += nDataBytes;
-        printf("Markerset Name: %s\n", szName);
+        strcpy(desc.arrDataDescriptions[i].Data.MarkerSetDescription->szName, ptr);
+        int nDataBytes = (int) strlen(desc.arrDataDescriptions[i].Data.MarkerSetDescription->szName) + 1;
+        ptr += nDataBytes; 
+        //printf("Markerset Name: %s\n", szName);
 
         // marker data
         int nMarkers = 0; memcpy(&nMarkers, ptr, 4); ptr += 4;
-        printf("Marker Count : %d\n", nMarkers);
+        desc.arrDataDescriptions[i].Data.MarkerSetDescription->nMarkers = nMarkers;
+        //printf("Marker Count : %d\n", nMarkers);
+
+        desc.arrDataDescriptions[i].Data.MarkerSetDescription->szMarkerNames = 
+          (char **)malloc(nMarkers*sizeof(char *));
 
         for(int j=0; j < nMarkers; j++)
-        {
-          char szName[256];
-          strcpy(szName, ptr);
-          int nDataBytes = (int) strlen(szName) + 1;
+        {         
+          desc.arrDataDescriptions[i].Data.MarkerSetDescription->szMarkerNames[j] = (char *)malloc(MAX_NAMELENGTH);
+          strcpy(desc.arrDataDescriptions[i].Data.MarkerSetDescription->szMarkerNames[j], ptr);
+          int nDataBytes = (int) strlen(desc.arrDataDescriptions[i].Data.MarkerSetDescription->szMarkerNames[j]) + 1;
           ptr += nDataBytes;
-          printf("Marker Name: %s\n", szName);
+          //printf("Marker Name: %s\n", szName);
         }
       }
-      else if(type ==1)   // rigid body
-      {
+      else if(type ==1){   // rigid body
+        desc.arrDataDescriptions[i].Data.RigidBodyDescription = 
+          (sRigidBodyDescription *)malloc(sizeof(sRigidBodyDescription));  
         if(major >= 2)
         {
           // name
-          char szName[MAX_NAMELENGTH];
-          strcpy(szName, ptr);
-          ptr += strlen(ptr) + 1;
-          printf("Name: %s\n", szName);
+          strcpy(desc.arrDataDescriptions[i].Data.RigidBodyDescription->szName, ptr);
+          int nDataBytes = (int) strlen(desc.arrDataDescriptions[i].Data.RigidBodyDescription->szName) + 1;
+          ptr += nDataBytes; 
+          printf("Name: %s\n", desc.arrDataDescriptions[i].Data.RigidBodyDescription->szName);
         }
 
-        int ID = 0; memcpy(&ID, ptr, 4); ptr +=4;
-        printf("ID : %d\n", ID);
+        memcpy(&(desc.arrDataDescriptions[i].Data.RigidBodyDescription->ID), ptr, 4); ptr +=4;
+        printf("ID : %d\n", desc.arrDataDescriptions[i].Data.RigidBodyDescription->ID);
      
-        int parentID = 0; memcpy(&parentID, ptr, 4); ptr +=4;
-        printf("Parent ID : %d\n", parentID);
+        memcpy(&(desc.arrDataDescriptions[i].Data.RigidBodyDescription->parentID), ptr, 4); ptr +=4;
+        printf("Parent ID : %d\n", desc.arrDataDescriptions[i].Data.RigidBodyDescription->parentID);
             
-        float xoffset = 0; memcpy(&xoffset, ptr, 4); ptr +=4;
-        printf("X Offset : %3.2f\n", xoffset);
+        memcpy(&(desc.arrDataDescriptions[i].Data.RigidBodyDescription->offsetx), ptr, 4); ptr +=4;
+        //printf("X Offset : %3.2f\n", xoffset);
 
-        float yoffset = 0; memcpy(&yoffset, ptr, 4); ptr +=4;
-        printf("Y Offset : %3.2f\n", yoffset);
+        memcpy(&(desc.arrDataDescriptions[i].Data.RigidBodyDescription->offsety), ptr, 4); ptr +=4;
+        //printf("Y Offset : %3.2f\n", yoffset);
 
-        float zoffset = 0; memcpy(&zoffset, ptr, 4); ptr +=4;
-        printf("Z Offset : %3.2f\n", zoffset);
+        memcpy(&(desc.arrDataDescriptions[i].Data.RigidBodyDescription->offsetz), ptr, 4); ptr +=4;
+        //printf("Z Offset : %3.2f\n", zoffset);
 
-      }
-      else if(type ==2)   // skeleton
-      {
-        char szName[MAX_NAMELENGTH];
-        strcpy(szName, ptr);
-        ptr += strlen(ptr) + 1;
-        printf("Name: %s\n", szName);
+      } else if(type == 2) {   // skeleton
+        desc.arrDataDescriptions[i].Data.SkeletonDescription = 
+          (sSkeletonDescription *)malloc(sizeof(sSkeletonDescription));  
+        // name
+        strcpy(desc.arrDataDescriptions[i].Data.SkeletonDescription->szName, ptr);
+        int nDataBytes = (int) strlen(desc.arrDataDescriptions[i].Data.SkeletonDescription->szName) + 1;
+        ptr += nDataBytes; 
+        //printf("Name: %s\n", szName);
 
-        int ID = 0; memcpy(&ID, ptr, 4); ptr +=4;
-        printf("ID : %d\n", ID);
+        memcpy(&(desc.arrDataDescriptions[i].Data.SkeletonDescription->skeletonID), ptr, 4); ptr +=4;
+        //printf("ID : %d\n", ID);
 
         int nRigidBodies = 0; memcpy(&nRigidBodies, ptr, 4); ptr +=4;
-        printf("RigidBody (Bone) Count : %d\n", nRigidBodies);
+        desc.arrDataDescriptions[i].Data.SkeletonDescription->nRigidBodies = nRigidBodies;
+        //printf("RigidBody (Bone) Count : %d\n", nRigidBodies);
 
-        for(int i=0; i< nRigidBodies; i++)
-        {
-          if(major >= 2)
-          {
+        for(int j=0; j < nRigidBodies; j++)   {
+          if(major >= 2)  {
             // RB name
-            char szName[MAX_NAMELENGTH];
-            strcpy(szName, ptr);
-            ptr += strlen(ptr) + 1;
-            printf("Rigid Body Name: %s\n", szName);
+            strcpy(desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].szName, ptr);
+            int nDataBytes = 
+              (int) strlen(desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].szName) + 1;
+            ptr += nDataBytes; 
+            //printf("Rigid Body Name: %s\n", szName);
           }
 
-          int ID = 0; memcpy(&ID, ptr, 4); ptr +=4;
-          printf("RigidBody ID : %d\n", ID);
+          memcpy(&desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].ID, ptr, 4); ptr +=4;
+          //printf("RigidBody ID : %d\n", ID);
 
-          int parentID = 0; memcpy(&parentID, ptr, 4); ptr +=4;
-          printf("Parent ID : %d\n", parentID);
+          memcpy(&desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].parentID, ptr, 4); ptr +=4;
+          //printf("Parent ID : %d\n", parentID);
 
-          float xoffset = 0; memcpy(&xoffset, ptr, 4); ptr +=4;
-          printf("X Offset : %3.2f\n", xoffset);
+          memcpy(&desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].offsetx, ptr, 4); ptr +=4;
+          //printf("X Offset : %3.2f\n", xoffset);
 
-          float yoffset = 0; memcpy(&yoffset, ptr, 4); ptr +=4;
-          printf("Y Offset : %3.2f\n", yoffset);
+          memcpy(&desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].offsety, ptr, 4); ptr +=4;
+          //printf("Y Offset : %3.2f\n", yoffset);
 
-          float zoffset = 0; memcpy(&zoffset, ptr, 4); ptr +=4;
-          printf("Z Offset : %3.2f\n", zoffset);
-        }
-      }
-
+          memcpy(&desc.arrDataDescriptions[i].Data.SkeletonDescription->RigidBodies[j].offsetz, ptr, 4); ptr +=4;
+          //printf("Z Offset : %3.2f\n", zoffset);
+        }  // end for
+      } // end if type == 2
     }   // next dataset
-
-  printf("End Packet\n-------------\n");
+  //printf("End Packet\n-------------\n");
   }
   else {
-      printf("Unrecognized Packet Type.\n");
+      //printf("Unrecognized Packet Type.\n");
   }
 }
 
@@ -484,9 +539,13 @@ int main (int argc, char **argv) {
   */
 
   // create unix socket to read incoming data
-  UdpMulticastSocket multicast_client_socket( LOCAL_PORT, MULTICAST_IP );
+  UdpMulticastSocket multicast_client_socket( DATA_PORT, MULTICAST_IP );
   ushort payload;
-  int numberOfPackets = 0;
+  sDataDescriptions desc;
+  rosbag::Bag bag;
+  bool isPreviouslyRecording = false;
+  int numReceivedPacket = 0;
+  int numBagSequence = 0;
   // Process mocap data until SIGINT
   while(ros::ok()) {
     bool packetread = false;
@@ -496,14 +555,30 @@ int main (int argc, char **argv) {
       numBytes = multicast_client_socket.recv();
       if( numBytes > 0 ) {
         const char* buffer = multicast_client_socket.getBuffer();        
+        numReceivedPacket = (numReceivedPacket + 1) % 200;
+        if (numReceivedPacket == 0) { 
+          printf("Data is streaming...\n");
+        }
         // parse a data packet
         sFrameOfMocapData data;
-        parseDataPacket(buffer, data);
-        // publish data to tf
-        broadcastTfData(data);
+        parseDataPacket(buffer, data, desc);
+        bool bIsRecording = data.params & 0x01;
+        if (bIsRecording && !isPreviouslyRecording) { 
+          char bag_name[20];
+          sprintf(bag_name, "test_traj_%d.bag", ++numBagSequence);
+          bag.open(bag_name, rosbag::bagmode::Write);
+          printf("Recording %s\n", bag_name);
+        } else if (!bIsRecording && isPreviouslyRecording) {
+          printf("Stopped recording\n");
+          bag.close();
+        }
+        // publish rigid body data to tf, if any is available
+        // also start recording tf data into rosbag 
+        broadcastRecordTfData(data, bag);
         // Free memory
         destroyDataPacket(data);
         packetread = true;
+        isPreviouslyRecording = bIsRecording;
       } 
     } while( numBytes > 0 );
 
