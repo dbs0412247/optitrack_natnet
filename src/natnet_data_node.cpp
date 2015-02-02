@@ -31,16 +31,17 @@
 #include <rosbag/bag.h>
 
 // Constants
-#define MULTICAST_IP  "239.255.42.99"
-#define DATA_PORT     1511
-#define CMD_PORT      1510
+#define MULTICAST_IP    "239.255.42.99"
+#define DATA_PORT       1511
+#define CMD_PORT        1510
+#define SHUTTLECOCK_ID  1
+#define STEREO_CAM_ID   2
 
 ros::Time first_ros_time;
 ros::Time first_timestamp;
 bool first_observation = true;
 
-void broadcastRecordTfData(sFrameOfMocapData &data, rosbag::Bag &bag) {
-  static tf::TransformBroadcaster br;
+void broadcastRecordTfData(tf::TransformBroadcaster &br, sFrameOfMocapData &data, rosbag::Bag &bag) {
   // calculate correct timestamp of msg
   if (first_observation) {
     first_observation = false;
@@ -70,6 +71,12 @@ void broadcastRecordTfData(sFrameOfMocapData &data, rosbag::Bag &bag) {
       transform.setRotation(q);
       sprintf(name, "Rigid_Body_ID_%d", data.RigidBodies[i].ID); 
       tf::StampedTransform stamped_tf = tf::StampedTransform(transform, time_of_data, "world", name); 
+      if (data.RigidBodies[i].ID == 1) 
+        stamped_tf = tf::StampedTransform(transform, time_of_data, "world", "Shuttlecock");
+      else if (data.RigidBodies[i].ID == 2)  
+        stamped_tf = tf::StampedTransform(transform, time_of_data, "world", "Stereo Camera"); 
+      else 
+        stamped_tf = tf::StampedTransform(transform, time_of_data, "world", name); 
       br.sendTransform(stamped_tf);
       // start recording to rosbag if mocap is also recording
       if (bIsRecording) {
@@ -397,6 +404,8 @@ bool parseDataPacket(const char* pData, sFrameOfMocapData &data, sDataDescriptio
 
       if(type == 0)   // markerset
       {
+        if (desc.arrDataDescriptions[i].Data.MarkerSetDescription != NULL) {
+        }
         desc.arrDataDescriptions[i].Data.MarkerSetDescription = 
           (sMarkerSetDescription *)malloc(sizeof(sMarkerSetDescription));        
 
@@ -504,6 +513,7 @@ int main (int argc, char **argv) {
   // Initialize ROS node
   ros::init(argc, argv, "natnet_data_node");
   ros::NodeHandle n("~");
+  static tf::TransformBroadcaster br;
 
   // TODO: Get configuration from ROS parameter server  
   /*
@@ -565,7 +575,7 @@ int main (int argc, char **argv) {
         bool bIsRecording = data.params & 0x01;
         if (bIsRecording && !isPreviouslyRecording) { 
           char bag_name[20];
-          sprintf(bag_name, "test_traj_%d.bag", ++numBagSequence);
+          sprintf(bag_name, "test_traj_%03d.bag", ++numBagSequence);
           bag.open(bag_name, rosbag::bagmode::Write);
           printf("Recording %s\n", bag_name);
         } else if (!bIsRecording && isPreviouslyRecording) {
@@ -574,7 +584,7 @@ int main (int argc, char **argv) {
         }
         // publish rigid body data to tf, if any is available
         // also start recording tf data into rosbag 
-        broadcastRecordTfData(data, bag);
+        broadcastRecordTfData(br, data, bag);
         // Free memory
         destroyDataPacket(data);
         packetread = true;
