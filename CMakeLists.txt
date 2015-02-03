@@ -112,6 +112,9 @@ add_executable(natnet_data_node
   src/natnet_data_node.cpp
   src/socket.cpp
 )
+add_executable(rosbag_data_processing_node 
+  src/rosbag_data_processing.cpp
+)
 
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
@@ -119,6 +122,9 @@ add_executable(natnet_data_node
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(natnet_data_node
+  ${catkin_LIBRARIES}
+)
+target_link_libraries(rosbag_data_processing_node
   ${catkin_LIBRARIES}
 )
 
